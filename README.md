@@ -5,6 +5,24 @@ camera path with a linear Kalman filter (and an offline RTS smoother), and
 warps each frame to follow the smooth path. Moving-average smoothing is
 included as a baseline, and everything is scored with quantitative metrics.
 
+## Demo
+
+A hand-held street video before (left) and after (right) stabilisation with the
+RTS smoother. The first 6 seconds are shown.
+
+![Raw shaky video next to the RTS-stabilised video](media/real_raw_vs_rts.gif)
+
+Full videos:
+
+- [Original shaky video](data/videoShake.m4v)
+- [Side-by-side comparison: raw | Kalman filter | RTS smoother](results_real/comparison_raw_kf_rts.mp4)
+
+| Method (real video) | ITF (dB) ↑ | Jitter ↓ | Max correction (px) ↓ |
+|---|---|---|---|
+| Raw (shaky) | 18.69 | 1.793 | 0.0 |
+| Kalman filter (causal) | 21.92 | 0.524 | 26.5 |
+| RTS smoother (offline) | 27.11 | 0.072 | 23.8 |
+
 ## Setup
 
 ```bash
