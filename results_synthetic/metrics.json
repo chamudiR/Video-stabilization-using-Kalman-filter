@@ -1,0 +1,52 @@
+{
+  "settings": {
+    "q_ratio": 0.0003,
+    "ma_window": 15,
+    "zoom": 1.12,
+    "R_estimated": {
+      "x": 20.68566234827346,
+      "y": 17.83930280559467,
+      "theta": 7.083944312596075e-05
+    },
+    "frames": 300,
+    "fps": 30.0,
+    "ransac_inlier_ratio": 0.9963512128648966
+  },
+  "methods": {
+    "raw": {
+      "ITF_psnr_dB": 25.822991301207228,
+      "jitter_px": 1.3144347205258753,
+      "max_correction_px": 0.0,
+      "rmse_to_intended_px": 8.683816547176697
+    },
+    "ma_causal": {
+      "ITF_psnr_dB": 31.353372206328736,
+      "jitter_px": 0.21130726143149486,
+      "max_correction_px": 56.48414273901102,
+      "rmse_to_intended_px": 10.81604364836717
+    },
+    "kf": {
+      "ITF_psnr_dB": 30.33613390539316,
+      "jitter_px": 0.4225809271573191,
+      "max_correction_px": 22.000955250094137,
+      "rmse_to_intended_px": 7.7959827428925275
+    },
+    "ma_centred": {
+      "ITF_psnr_dB": 31.184544408142894,
+      "jitter_px": 0.212262577458087,
+      "max_correction_px": 15.279480752760369,
+      "rmse_to_intended_px": 5.7904370193410015
+    },
+    "rts": {
+      "ITF_psnr_dB": 31.73491816267471,
+      "jitter_px": 0.06312683742320928,
+      "max_correction_px": 17.30768003768685,
+      "rmse_to_intended_px": 5.746981876316026
+    }
+  },
+  "kf_consistency_x": {
+    "mean_NIS": 2.888847972068086,
+    "pct_innov_within_2sigma": 82.0
+  },
+  "motion_estimation_rmse_px": 0.8934040923339335
+}

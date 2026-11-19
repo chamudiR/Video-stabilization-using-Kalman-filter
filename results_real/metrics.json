@@ -1,0 +1,46 @@
+{
+  "settings": {
+    "q_ratio": 0.0003,
+    "ma_window": 15,
+    "zoom": 1.12,
+    "R_estimated": {
+      "x": 20.22556137631333,
+      "y": 34.552741985861815,
+      "theta": 2.340773558943737e-05
+    },
+    "frames": 495,
+    "fps": 28.767547881339514,
+    "ransac_inlier_ratio": 0.9921640169156442
+  },
+  "methods": {
+    "raw": {
+      "ITF_psnr_dB": 18.693505971237016,
+      "jitter_px": 1.7927238341675942,
+      "max_correction_px": 0.0
+    },
+    "ma_causal": {
+      "ITF_psnr_dB": 24.105737502166104,
+      "jitter_px": 0.2863242228402983,
+      "max_correction_px": 41.779507127059276
+    },
+    "kf": {
+      "ITF_psnr_dB": 21.919042408478894,
+      "jitter_px": 0.5239794800559013,
+      "max_correction_px": 26.495948149035428
+    },
+    "ma_centred": {
+      "ITF_psnr_dB": 24.17989909530768,
+      "jitter_px": 0.2864777665158209,
+      "max_correction_px": 20.544664294908756
+    },
+    "rts": {
+      "ITF_psnr_dB": 27.106816409057018,
+      "jitter_px": 0.0724551815307041,
+      "max_correction_px": 23.841599703427562
+    }
+  },
+  "kf_consistency_x": {
+    "mean_NIS": 4.8258173182553055,
+    "pct_innov_within_2sigma": 58.58585858585859
+  }
+}
