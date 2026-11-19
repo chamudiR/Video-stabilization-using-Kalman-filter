@@ -1,0 +1,733 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.3cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+
+\captionsetup{font=small,labelfont=bf}
+\lstset{
+  language=Python,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{blue!60!black}\bfseries,
+  commentstyle=\color{green!40!black}\itshape,
+  stringstyle=\color{red!60!black},
+  numbers=left, numberstyle=\tiny\color{gray}, numbersep=6pt,
+  frame=lines, framesep=4pt, xleftmargin=1.5em,
+  columns=fullflexible, keepspaces=true,
+  showstringspaces=false, breaklines=true, tabsize=4,
+  aboveskip=8pt, belowskip=6pt, captionpos=t,
+}
+\renewcommand{\lstlistingname}{Listing}
+\graphicspath{{figures/}}
+\newcommand{\T}{^{\mathsf T}}
+
+\title{Video Stabilisation with a Kalman Filter and\\ Rauch--Tung--Striebel Smoother}
+\author{%
+  \textcolor{red}{Your Name} \quad (\textcolor{red}{Index No.})\\[2pt]
+  Autonomous Systems --- Semester 7}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Hand-held video contains unwanted high-frequency camera motion (shake) on top of the
+motion the operator intends. This report treats stabilisation as a state-estimation
+problem: the camera's intended path is the hidden state of a constant-velocity model, and
+the measured, shaky path is a noisy observation of it. Inter-frame motion is estimated with
+corner tracking and a RANSAC-fitted similarity transform; the resulting trajectory is
+smoothed with a linear Kalman filter (causal) and a Rauch--Tung--Striebel (RTS) smoother
+(offline), and compared against causal and centred moving-average baselines. On a synthetic
+video with known ground truth, motion estimation is accurate to $0.89$\,px and the RTS
+smoother gives the lowest error to the true intended path ($5.75$\,px) and roughly a third
+of the jitter of the best baseline. On a real hand-held video the RTS smoother raises the
+inter-frame PSNR from $18.7$ to $27.1$\,dB. Consistency tests show that the filter is
+over-confident, because real shake is strongly correlated in time rather than white; this
+points to concrete model improvements.
+\end{abstract}
+
+% =====================================================================
+\section{Introduction}
+% =====================================================================
+Videos recorded while walking, or from a vehicle or drone, shake. Mechanical gimbals remove
+this at the source, but software (digital) stabilisation is cheaper and can be applied after
+recording. Every digital stabiliser has three stages~\cite{morimoto1998}: \emph{motion
+estimation} (how did the camera move between frames?), \emph{motion smoothing} (which part
+of that motion was intended?), and \emph{motion compensation} (warp each frame so the video
+follows the intended path).
+
+The smoothing stage is naturally a filtering problem. If the intended camera path is
+modelled as a dynamic system and the shake as noise, the Kalman filter~\cite{kalman1960}
+gives the minimum-variance estimate of the intended path from past frames, and the RTS
+smoother~\cite{rts1965} gives the corresponding estimate using the whole recording. Kalman
+filtering has been used for stabilisation for many years~\cite{litvin2003}; other approaches
+include Gaussian smoothing of the path~\cite{matsushita2006} and optimisation of piecewise
+smooth camera paths~\cite{grundmann2011}. A recent open-source student project applies a
+scalar random-walk Kalman filter separately to each motion parameter~\cite{spoorthiuk}.
+
+This report develops a constant-velocity Kalman filter and RTS smoother for stabilisation,
+validates the full pipeline on a synthetic video for which the true intended path is known,
+applies it to a real hand-held video, and uses filter-consistency tests to examine where the
+model assumptions break down.
+
+% =====================================================================
+\section{Method}
+% =====================================================================
+
+\subsection{Pipeline overview}
+\begin{enumerate}
+  \item \textbf{Motion estimation:} estimate the motion $(\Delta x_k, \Delta y_k,
+        \Delta\theta_k)$ between each pair of consecutive frames.
+  \item \textbf{Trajectory:} accumulate the motion into the raw camera path $z_k$.
+  \item \textbf{Smoothing:} estimate the intended path $\hat p_k$ with four methods: causal
+        moving average, Kalman filter, centred moving average and RTS smoother.
+  \item \textbf{Compensation:} warp each frame by $\hat p_k - z_k$ and crop the borders.
+  \item \textbf{Evaluation:} measure steadiness, smoothness, cropping and (for synthetic
+        video) error against the true intended path.
+\end{enumerate}
+
+\subsection{Motion estimation}
+In frame $k-1$, up to 400 Shi--Tomasi corners~\cite{shitomasi1994} are detected (quality
+level $0.01$, minimum spacing 15\,px). Each corner is tracked into frame $k$ with pyramidal
+Lucas--Kanade optical flow~\cite{lucaskanade1981,bouguet2001}. A similarity transform
+(rotation $\Delta\theta_k$ and translation $(\Delta x_k, \Delta y_k)$, plus a uniform scale
+that is not used) is fitted to the tracked pairs with RANSAC~\cite{fischler1981}, using a
+reprojection threshold of 3\,px. RANSAC rejects correspondences that do not follow the
+dominant (background) motion, such as points on moving objects or tracking failures. If
+tracking fails completely, zero motion is assumed for that frame.
+
+The raw camera trajectory is the cumulative sum of the per-frame motion,
+\begin{equation}
+  z_k = \sum_{j=1}^{k} \bigl(\Delta x_j,\ \Delta y_j,\ \Delta\theta_j\bigr), \qquad z_0 = 0 .
+\end{equation}
+Figures~\ref{fig:tracking-synth} and~\ref{fig:tracking-real} show this step for two frame pairs of each video.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{synth_tracking_50.png}\\[4pt]
+  \includegraphics[width=\linewidth]{synth_tracking_140.png}
+  \caption{Motion estimation on consecutive frames of the synthetic video. Left: corners
+  detected in frame $k$. Right: each corner's displacement into frame $k+1$ (arrows magnified
+  by the factor in the panel title), green for RANSAC inliers and red for rejected outliers.
+  Top: frames 50$\to$51 (hand shake only). Bottom: frames 140$\to$141 (during the fast pan).
+  The true motion is shown for comparison.}
+  \label{fig:tracking-synth}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{real_tracking_250.png}\\[4pt]
+  \includegraphics[width=\linewidth]{real_tracking_112.png}
+  \caption{Motion estimation on consecutive frames of the real video, drawn as in
+  Figure~\ref{fig:tracking-synth}. Top: frames 250$\to$251. Bottom: frames 112$\to$113, the
+  largest per-frame motion in the clip. RANSAC rejects the corners on the moving car (red),
+  whose motion differs from the background.}
+  \label{fig:tracking-real}
+\end{figure}
+
+\subsection{State-space model}\label{sec:model}
+Each axis ($x$, $y$, $\theta$) is filtered independently. For one axis, the state is the
+position and velocity of the intended path, $\mathbf{x}_k = [p_k,\ v_k]\T$, and the time step
+is one frame. The intended motion is modelled as constant velocity driven by random
+acceleration (the discrete white-noise acceleration model~\cite{barshalom2001}):
+\begin{align}
+  \mathbf{x}_k &= F\,\mathbf{x}_{k-1} + \mathbf{w}_k, &
+  F &= \begin{bmatrix} 1 & 1 \\ 0 & 1 \end{bmatrix}, &
+  \mathbf{w}_k &\sim \mathcal{N}(0, Q), &
+  Q &= q\,G G\T,\quad G = \begin{bmatrix} \tfrac12 \\ 1 \end{bmatrix}, \\
+  z_k &= H\,\mathbf{x}_k + v_k, &
+  H &= \begin{bmatrix} 1 & 0 \end{bmatrix}, &
+  v_k &\sim \mathcal{N}(0, R). &&
+\end{align}
+The measurement $z_k$ is the raw trajectory. The shake is treated as measurement noise:
+the measured path equals the intended path plus a zero-mean disturbance.
+
+\subsection{Kalman filter}\label{sec:kf}
+Starting from $\hat{\mathbf{x}}_{0|-1} = [z_0,\ 0]\T$ and $P_{0|-1} = \operatorname{diag}(R, R)$,
+each frame performs a prediction and an update:
+\begin{align}
+  \hat{\mathbf{x}}_{k|k-1} &= F\,\hat{\mathbf{x}}_{k-1|k-1}, &
+  P_{k|k-1} &= F P_{k-1|k-1} F\T + Q, \\
+  \nu_k &= z_k - H\hat{\mathbf{x}}_{k|k-1}, &
+  S_k &= H P_{k|k-1} H\T + R, \\
+  K_k &= P_{k|k-1} H\T S_k^{-1}, &
+  \hat{\mathbf{x}}_{k|k} &= \hat{\mathbf{x}}_{k|k-1} + K_k \nu_k, \\
+  P_{k|k} &= (I - K_k H) P_{k|k-1} (I - K_k H)\T + K_k R K_k\T . &&
+\end{align}
+The covariance update uses the Joseph form, which keeps $P$ symmetric and positive definite
+in finite precision. The causal estimate of the intended path is $\hat p_k = [\hat{\mathbf{x}}_{k|k}]_1$.
+
+\subsection{RTS smoother}\label{sec:rts}
+A recorded video is processed offline, so future frames are also available. The RTS
+smoother~\cite{rts1965} runs backwards over the stored filter output, for $k = N-1, \dots, 0$:
+\begin{align}
+  C_k &= P_{k|k} F\T P_{k+1|k}^{-1}, \\
+  \hat{\mathbf{x}}_{k|N} &= \hat{\mathbf{x}}_{k|k} + C_k \bigl(\hat{\mathbf{x}}_{k+1|N} - \hat{\mathbf{x}}_{k+1|k}\bigr), \\
+  P_{k|N} &= P_{k|k} + C_k \bigl(P_{k+1|N} - P_{k+1|k}\bigr) C_k\T .
+\end{align}
+Each smoothed estimate uses all $N$ frames, which removes the lag a causal filter must
+have on intentional motion.
+
+\subsection{Noise parameters}\label{sec:noise}
+The measurement-noise variance $R$ is estimated separately for each axis from the data,
+as the variance of the high-frequency residual
+\begin{equation}
+  R = \operatorname{Var}\bigl(z_k - \operatorname{MA}_{15}(z)_k\bigr),
+\end{equation}
+where $\operatorname{MA}_{15}$ is a centred 15-frame moving average. The process noise is
+set relative to it, $q = \rho R$, so that a single dimensionless ratio $\rho = Q/R$ controls
+the smoothing on all three axes (default $\rho = 3\times10^{-4}$). A smaller $\rho$ trusts
+the motion model more and gives a smoother but more lagging path.
+
+\subsection{Baselines}
+Two moving averages with a 15-frame window are used for comparison: a \emph{causal}
+(trailing) average, which uses only past frames like the Kalman filter, and a \emph{centred}
+average, which uses past and future frames like the RTS smoother.
+
+\subsection{Motion compensation}\label{sec:comp}
+Each frame is warped by the correction $\Delta_k = \hat p_k - z_k$ (a rotation by
+$\Delta_k^\theta$ and translation by $(\Delta_k^x, \Delta_k^y)$), then scaled by $s = 1.12$
+about the image centre so that the moving black borders fall outside the visible area.
+At $640\times360$ this hides corrections of up to $38.4$\,px horizontally and $21.6$\,px
+vertically.
+
+% =====================================================================
+\section{Implementation}
+% =====================================================================
+The pipeline is written in Python 3. NumPy is used for the filter, OpenCV for feature
+tracking and image warping, and Matplotlib for the plots. The Kalman filter and RTS smoother
+are implemented from scratch rather than taken from a library. The code is split into three
+files: \texttt{kalman.py} (state-space model, Kalman filter, RTS smoother and moving
+averages), \texttt{stabilize.py} (motion estimation, smoothing, compensation and evaluation)
+and \texttt{synth\_video.py} (the synthetic test video). The listings below are excerpts of
+the key routines. Lines that only allocate or store arrays are replaced by \texttt{...}.
+
+\subsection{Motion estimation}
+Listing~\ref{lst:motion} is the body of the loop over consecutive frame pairs. The rotation
+angle is recovered from the fitted $2\times3$ matrix as $\operatorname{atan2}(m_{21}, m_{11})$,
+which ignores the unused scale factor.
+
+\begin{lstlisting}[caption={Per-frame motion estimation (\texttt{stabilize.py}).},label=lst:motion]
+pts = cv2.goodFeaturesToTrack(prev_gray, maxCorners=400, qualityLevel=0.01,
+                              minDistance=15, blockSize=3)       # Shi-Tomasi corners
+m = None
+if pts is not None and len(pts) >= 10:
+    nxt, st, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, pts, None)  # pyramidal LK
+    good = st.ravel() == 1
+    if good.sum() >= 10:
+        m, inl = cv2.estimateAffinePartial2D(pts[good], nxt[good],   # similarity + RANSAC
+                                             method=cv2.RANSAC,
+                                             ransacReprojThreshold=3.0)
+if m is None:                      # tracking failed: assume no motion
+    transforms.append((0.0, 0.0, 0.0))
+else:
+    transforms.append((m[0, 2], m[1, 2], np.arctan2(m[1, 0], m[0, 0])))
+...
+raw = np.vstack([np.zeros(3), np.cumsum(transforms, axis=0)])   # trajectory z_k
+\end{lstlisting}
+
+\subsection{State-space model and Kalman filter}
+Listing~\ref{lst:model} builds the matrices of the constant-velocity model in Section~\ref{sec:model},
+and Listing~\ref{lst:kf} is the filter recursion in Section~\ref{sec:kf}. Because the measurement is
+a scalar, $S_k$ is a number and the gain is a division, not a matrix inverse. The predicted
+and filtered states and covariances are stored at every frame, because the RTS smoother
+needs them. The innovations $\nu_k$ and their variances $S_k$ are stored for the consistency
+tests.
+
+\begin{lstlisting}[caption={Constant-velocity model (\texttt{kalman.py}).},label=lst:model]
+def cv_model(q, r, dt=1.0):
+    """Return F, H, Q, R for the constant-velocity model."""
+    F = np.array([[1.0, dt],
+                  [0.0, 1.0]])
+    H = np.array([[1.0, 0.0]])
+    G = np.array([[0.5 * dt ** 2],
+                  [dt]])
+    Q = q * (G @ G.T)           # discrete white-noise acceleration
+    R = np.array([[r]])
+    return F, H, Q, R
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Kalman filter predict/update loop with the Joseph-form covariance update (\texttt{kalman.py}).},label=lst:kf]
+def kalman_filter(z, F, H, Q, R, x0=None, P0=None):
+    n, nx = len(z), F.shape[0]
+    I = np.eye(nx)
+    if x0 is None:
+        x0 = np.array([z[0], 0.0])          # start at first measurement, zero velocity
+    if P0 is None:
+        P0 = np.diag([R[0, 0], R[0, 0]])
+    ...                                     # allocate x_pred, P_pred, x_filt, P_filt, ...
+    for k in range(n):
+        # ---- Predict ----
+        if k == 0:
+            xp, Pp = x0, P0
+        else:
+            xp = F @ x_filt[k - 1]
+            Pp = F @ P_filt[k - 1] @ F.T + Q
+        # ---- Update ----
+        y = z[k] - (H @ xp)[0]              # innovation
+        S = (H @ Pp @ H.T + R)[0, 0]        # innovation covariance
+        K = (Pp @ H.T)[:, 0] / S            # Kalman gain
+        xf = xp + K * y
+        KH = np.outer(K, H[0])
+        # Joseph form: keeps P symmetric positive definite
+        Pf = (I - KH) @ Pp @ (I - KH).T + np.outer(K, K) * R[0, 0]
+        ...                                 # store xp, Pp, xf, Pf, K, y, S for frame k
+\end{lstlisting}
+
+\subsection{RTS smoother}
+Listing~\ref{lst:rts} implements the backward pass in Section~\ref{sec:rts}. It starts from the last
+filtered estimate, which is already the smoothed estimate for $k = N$, and works back to the
+first frame using the stored predictions.
+
+\begin{lstlisting}[caption={Rauch--Tung--Striebel backward pass (\texttt{kalman.py}).},label=lst:rts]
+def rts_smoother(kf, F):
+    x_f, P_f = kf["x_filt"], kf["P_filt"]
+    x_p, P_p = kf["x_pred"], kf["P_pred"]
+    n = len(x_f)
+    x_s, P_s = x_f.copy(), P_f.copy()
+    for k in range(n - 2, -1, -1):
+        C = P_f[k] @ F.T @ np.linalg.inv(P_p[k + 1])     # smoother gain
+        x_s[k] = x_f[k] + C @ (x_s[k + 1] - x_p[k + 1])
+        P_s[k] = P_f[k] + C @ (P_s[k + 1] - P_p[k + 1]) @ C.T
+    return {"x_smooth": x_s, "P_smooth": P_s}
+\end{lstlisting}
+
+\subsection{Noise estimation and per-axis smoothing}
+Listing~\ref{lst:smooth} estimates $R$ from the data (Section~\ref{sec:noise}) and runs one filter and
+smoother on each axis, with $q = \rho R$. The moving-average baselines are computed in the
+same loop.
+
+\begin{lstlisting}[caption={Estimating $R$ and smoothing each axis (\texttt{stabilize.py}).},label=lst:smooth]
+def estimate_R(traj, window=15):
+    R = []
+    for a in range(traj.shape[1]):
+        resid = traj[:, a] - moving_average(traj[:, a], window)  # high-frequency residual
+        R.append(max(np.var(resid), 1e-10))
+    return np.array(R)
+
+def smooth(traj, q_ratio, R, ma_window):
+    ...
+    for a, name in enumerate(AXES):                     # x, y, theta independently
+        z = traj[:, a]
+        F, H, Q, Rm = cv_model(q=q_ratio * R[a], r=R[a])
+        kf = kalman_filter(z, F, H, Q, Rm)
+        rts = rts_smoother(kf, F)
+        out["kf"][:, a] = kf["x_filt"][:, 0]            # causal estimate of p_k
+        out["rts"][:, a] = rts["x_smooth"][:, 0]        # offline estimate of p_k
+        out["ma_causal"][:, a] = moving_average(z, ma_window, causal=True)
+        out["ma_centred"][:, a] = moving_average(z, ma_window, causal=False)
+\end{lstlisting}
+
+\subsection{Motion compensation}
+Listing~\ref{lst:warp} builds the warp for frame $k$ from the correction
+$\Delta_k = \hat p_k - z_k$ (Section~\ref{sec:comp}). The rotation and translation are applied first,
+then the zoom about the image centre.
+
+\begin{lstlisting}[caption={Correction warp and border zoom (\texttt{stabilize.py}).},label=lst:warp]
+def correction_matrix(corr, zoom, w, h):
+    dx, dy, da = corr
+    c, s = np.cos(da), np.sin(da)
+    M = np.array([[c, -s, dx], [s, c, dy], [0, 0, 1.0]])       # rotate + translate
+    Z = np.array([[zoom, 0, (1 - zoom) * w / 2],               # zoom about the centre
+                  [0, zoom, (1 - zoom) * h / 2],
+                  [0, 0, 1.0]])
+    return (Z @ M)[:2]
+
+corrections = paths[method] - raw_traj                         # Delta_k for every frame
+M = correction_matrix(corrections[k], zoom, w, h)
+stabilised = cv2.warpAffine(frame, M, (w, h), borderMode=cv2.BORDER_CONSTANT)
+\end{lstlisting}
+
+% =====================================================================
+\section{Experimental setup}
+% =====================================================================
+
+\subsection{Synthetic video}
+A synthetic video allows the true intended path to be measured against. A virtual
+$640\times360$ camera views a large scene textured with 450 random rectangles, circles and
+lines, giving plenty of trackable corners. Its intended path pans horizontally at 1\,px per
+frame, with a deliberate fast pan between 40\% and 55\% of the clip (frames 120--165) in
+which a raised-cosine velocity profile adds up to 7\,px per frame, and drifts vertically as
+$15\sin t$ px for $t \in [0, 1.5\pi]$. Hand shake is added to $x$, $y$ and $\theta$ as
+Gaussian noise low-pass filtered with a Gaussian kernel ($\sigma = 2$ frames) and scaled to a
+standard deviation of 6\,px and $0.6^\circ$. Gaussian sensor noise ($\sigma = 2$ grey levels) is
+added to every frame. The clip has 300 frames at 30\,fps, and the true shaky and intended
+camera transforms are saved for every frame.
+
+\subsection{Real video}
+The real video is a hand-held recording of a street scene, $640\times360$ pixels, 495 frames
+at 28.8\,fps (17.2\,s). The camera pans steadily, moving the scene by about 550\,px
+horizontally and 120\,px vertically over the clip, with the irregular shake typical of
+walking. There is no ground truth for this video.
+% TODO: state where the real video comes from (own recording or a public test clip).
+
+\subsection{Metrics}
+\begin{itemize}
+  \item \textbf{Inter-frame transformation fidelity (ITF)}~\cite{morimoto1998}: the mean PSNR
+        between consecutive output frames, computed on the central 80\% of each greyscale frame
+        to exclude borders. Higher means a steadier video.
+  \item \textbf{Jitter}: the RMS second difference of the $x, y$ path,
+        $J = \bigl(\frac{1}{2(N-2)} \sum_k \lVert \hat p_{k+1} - 2\hat p_k + \hat p_{k-1}\rVert^2\bigr)^{1/2}$,
+        in px/frame$^2$. Lower means a smoother path.
+  \item \textbf{Maximum correction}: the largest $|\Delta_k^x|$ or $|\Delta_k^y|$ over the clip.
+        Larger values need more cropping.
+  \item \textbf{RMSE to the intended path} (synthetic video only): the RMS distance between the
+        $x, y$ path and the true intended path after removing the best constant offset, since
+        frame 0 already contains shake and the absolute position of the output is arbitrary.
+  \item \textbf{Filter consistency}: the normalised innovation squared (NIS)
+        $\epsilon_k = \nu_k^2 / S_k$, which has expected value 1 for a consistent filter, and the
+        fraction of innovations inside $\pm 2\sqrt{S_k}$, which should be about 95\%~\cite{barshalom2001}.
+\end{itemize}
+
+\subsection{Settings}
+Table~\ref{tab:settings} lists the settings, which are the same for both videos.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Settings and estimated measurement noise.}
+  \label{tab:settings}
+  \begin{tabular}{lcc}
+    \toprule
+    Parameter & Synthetic & Real \\
+    \midrule
+    Frames / frame rate & 300 / 30.0\,fps & 495 / 28.8\,fps \\
+    Resolution & $640\times360$ & $640\times360$ \\
+    Process-to-measurement noise ratio $\rho = Q/R$ & $3\times10^{-4}$ & $3\times10^{-4}$ \\
+    Moving-average window & 15 frames & 15 frames \\
+    Border zoom $s$ & 1.12 & 1.12 \\
+    Estimated $R_x$ / $R_y$ (px$^2$) & 20.69 / 17.84 & 20.23 / 34.55 \\
+    Estimated $R_\theta$ (rad$^2$) & $7.08\times10^{-5}$ & $2.34\times10^{-5}$ \\
+    Mean RANSAC inlier ratio & 0.996 & 0.992 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+% =====================================================================
+\section{Results: synthetic video}
+% =====================================================================
+
+\subsection{Motion estimation}
+The estimated raw trajectory matches the true shaky trajectory with an RMSE of $0.89$\,px
+over the 300 frames. For the frame pairs in Figure~\ref{fig:tracking-synth}, the estimated motion
+is within $0.02$\,px and $0.004^\circ$ of the truth, both for pure shake (frame 50) and
+during the fast pan (frame 140). The motion-estimation stage is therefore accurate, and
+the differences between methods below come from the smoothing stage.
+
+\subsection{Stabilisation performance}
+Table~\ref{tab:synth} gives the metrics and Figure~\ref{fig:synth-traj} the trajectories.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Results on the synthetic video. Best value in each column in bold.}
+  \label{tab:synth}
+  \begin{tabular}{lcccc}
+    \toprule
+    Method & ITF (dB) $\uparrow$ & Jitter $\downarrow$ & Max corr.\ (px) $\downarrow$ & RMSE (px) $\downarrow$ \\
+    \midrule
+    Raw (shaky)              & 25.82 & 1.314 & 0.0  & 8.68 \\
+    Moving average, causal   & 31.36 & 0.211 & 56.5 & 10.82 \\
+    Kalman filter (causal)   & 30.34 & 0.423 & 22.0 & 7.80 \\
+    Moving average, centred  & 31.19 & 0.212 & \textbf{15.3} & 5.79 \\
+    RTS smoother (offline)   & \textbf{31.74} & \textbf{0.063} & 17.3 & \textbf{5.75} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=0.85\linewidth]{synth_trajectories.png}
+  \caption{Camera trajectory on the synthetic video for the $x$, $y$ and rotation axes: raw
+  (shaky) trajectory, the four smoothers, and the true intended path.}
+  \label{fig:synth-traj}
+\end{figure}
+
+The RTS smoother is best on three of the four metrics. Its jitter ($0.063$) is about 30\% of
+that of the centred moving average ($0.212$), the best baseline, while its error to the
+intended path is the lowest of all methods. The constant-velocity model fits a slowly varying
+pan better than a box filter does, so the RTS smoother can remove more shake without
+distorting the intended motion.
+
+Among the causal methods there is a clear trade-off. The causal moving average is smoother
+than the Kalman filter (jitter $0.211$ against $0.423$), but it lags the intended motion: a
+trailing 15-frame window has a delay of 7 frames, so during the fast pan it falls behind and
+needs a correction of up to $56.5$\,px, and its RMSE ($10.82$\,px) is worse than the
+unstabilised video. The Kalman filter follows the pan more closely (maximum correction
+$22.0$\,px, RMSE $7.80$\,px) but lets more shake through. Figure~\ref{fig:synth-pan} shows the
+pan in detail: both causal methods lag at the start, and the Kalman filter overshoots at the
+end because its velocity estimate takes time to decay. Both offline methods follow the true
+path closely throughout.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{synth_trajectories_pan_zoom.png}
+  \caption{Close-up of the $x$ trajectory around the fast pan (synthetic video).}
+  \label{fig:synth-pan}
+\end{figure}
+
+Figure~\ref{fig:synth-tradeoff} sweeps $\rho$ from $10^{-6}$ to $1$ for the Kalman filter and
+RTS smoother, and the window from 3 to 91 frames for the moving averages. The RTS curve lies
+below all the others: for any level of smoothness it is the most faithful to the intended
+path, reaching a minimum RMSE of about $5.4$\,px. At moderate smoothing (jitter around $0.4$)
+the two causal methods perform alike, but at stronger smoothing the Kalman filter's error
+grows faster than that of the causal moving average, because a very small $Q$ makes the filter
+hold on to the pan velocity and overshoot.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.7\linewidth]{synth_tradeoff_q_sweep.png}
+  \caption{Smoothness against fidelity on the synthetic video, sweeping $\rho = Q/R$ (Kalman
+  filter, RTS) or the window length (moving averages). Down and to the left is better.}
+  \label{fig:synth-tradeoff}
+\end{figure}
+
+Figure~\ref{fig:synth-mean} shows the visual effect. Averaging ten consecutive output frames
+turns any remaining shake into blur: the raw video is strongly blurred, the Kalman filter output
+less so, and the RTS output is sharp apart from a horizontal smear of about 10\,px caused by the
+intended 1\,px-per-frame pan, which stabilisation should keep.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{synth_temporal_mean.png}
+  \caption{Mean of 10 consecutive output frames (frames 40--49) of the synthetic video: raw,
+  Kalman filter and RTS smoother. Residual shake appears as blur.}
+  \label{fig:synth-mean}
+\end{figure}
+
+% =====================================================================
+\section{Results: real video}
+% =====================================================================
+Table~\ref{tab:real} gives the metrics for the real video. Without ground truth, the RMSE
+column is not available and the trade-off plot uses the maximum correction instead.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Results on the real video. Best value in each column in bold.}
+  \label{tab:real}
+  \begin{tabular}{lccc}
+    \toprule
+    Method & ITF (dB) $\uparrow$ & Jitter $\downarrow$ & Max corr.\ (px) $\downarrow$ \\
+    \midrule
+    Raw (shaky)              & 18.69 & 1.793 & 0.0 \\
+    Moving average, causal   & 24.11 & 0.286 & 41.8 \\
+    Kalman filter (causal)   & 21.92 & 0.524 & 26.5 \\
+    Moving average, centred  & 24.18 & 0.286 & \textbf{20.5} \\
+    RTS smoother (offline)   & \textbf{27.11} & \textbf{0.072} & 23.8 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The ranking agrees with the synthetic results. The RTS smoother raises the ITF by $8.4$\,dB over
+the raw video and by $2.9$\,dB over the best baseline, and its jitter ($0.072$) is a quarter of
+that of either moving average. The causal trade-off is also the same: the causal moving average
+is smoother than the Kalman filter but needs far more correction ($41.8$ against $26.5$\,px).
+Figure~\ref{fig:real-traj} shows the trajectories; the shake is larger on this video, and it
+is largest in $y$ ($R_y = 34.6$\,px$^2$ against $R_x = 20.2$\,px$^2$), consistent with the
+vertical bounce of walking.
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=0.85\linewidth]{real_trajectories.png}
+  \caption{Camera trajectory on the real video for the $x$, $y$ and rotation axes: raw (shaky)
+  trajectory and the four smoothers.}
+  \label{fig:real-traj}
+\end{figure}
+
+On the trade-off curve (Figure~\ref{fig:real-tradeoff}), the RTS smoother again dominates. Here
+the Kalman filter lies below the causal moving average: for the same smoothness it needs less
+correction (for example about 30\,px against 42\,px at a jitter of $0.3$), so on this video the
+model-based causal filter is the better real-time choice. Figure~\ref{fig:real-mean} shows the
+visual result: over ten frames the raw video is badly blurred, the Kalman filter output is partly
+sharp, and the RTS output is sharp except for the car, which is genuinely moving.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.7\linewidth]{real_tradeoff_q_sweep.png}
+  \caption{Smoothness against required correction on the real video, sweeping $\rho$ or the
+  window length. Down and to the left is better.}
+  \label{fig:real-tradeoff}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{real_temporal_mean.png}
+  \caption{Mean of 10 consecutive output frames (frames 60--69) of the real video: raw, Kalman
+  filter and RTS smoother. The car in the foreground is moving, so it blurs in every panel.}
+  \label{fig:real-mean}
+\end{figure}
+
+% =====================================================================
+\section{Discussion}
+% =====================================================================
+
+\subsection{Filter consistency}
+Table~\ref{tab:nis} summarises the consistency tests, and Figures~\ref{fig:synth-diag}
+and~\ref{fig:real-diag} show them for the $x$ axis.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Kalman filter consistency per axis: mean NIS (ideal 1) and percentage of innovations
+  inside $\pm2\sqrt{S}$ (ideal 95\%).}
+  \label{tab:nis}
+  \begin{tabular}{lcccc}
+    \toprule
+    & \multicolumn{2}{c}{Synthetic} & \multicolumn{2}{c}{Real} \\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+    Axis & Mean NIS & Inside $\pm2\sqrt{S}$ & Mean NIS & Inside $\pm2\sqrt{S}$ \\
+    \midrule
+    $x$      & 2.89 & 82\% & 4.83 & 59\% \\
+    $y$      & 1.37 & 93\% & 2.00 & 86\% \\
+    $\theta$ & 1.14 & 94\% & 4.67 & 58\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+On the synthetic video, the $y$ and $\theta$ filters are close to consistent. The $x$ filter
+is not, and its large innovations are concentrated around the fast pan
+(Figure~\ref{fig:synth-diag}, frames 130--170): with a small $Q$, the model does not expect a
+manoeuvre of that size. On the real video all three axes are over-confident, most of all $x$
+and $\theta$.
+
+The main cause is visible in the innovation sequences: they oscillate smoothly instead of
+looking like white noise. Their lag-one autocorrelation on the $x$ axis is $0.95$ (synthetic) and
+$0.97$ (real), where a consistent filter would give a value near zero. Hand shake is coloured
+noise, correlated over several frames, but the model assumes the measurement noise $v_k$ is
+white. Two extensions would address the two causes: augmenting the state with a shake process
+(for example a first-order autoregressive model) so that correlated shake is modelled
+explicitly, and an adaptive $Q$ or an interacting multiple-model filter~\cite{barshalom2001}
+that switches to a manoeuvre model during deliberate pans.
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=0.72\linewidth]{synth_kf_diagnostics.png}
+  \caption{Kalman filter diagnostics on the synthetic video ($x$ axis): innovations with the
+  $\pm2\sqrt{S}$ band, NIS with its expected value and $\chi^2_1$ 95\% bound, and the Kalman gain.}
+  \label{fig:synth-diag}
+\end{figure}
+
+\begin{figure}[tbp]
+  \centering
+  \includegraphics[width=0.72\linewidth]{real_kf_diagnostics.png}
+  \caption{Kalman filter diagnostics on the real video ($x$ axis).}
+  \label{fig:real-diag}
+\end{figure}
+
+\subsection{$Q/R$ as a bandwidth}
+The Kalman gain converges within about 30 frames to $K_\infty = [0.170,\ 0.0158]\T$
+(bottom panels of Figures~\ref{fig:synth-diag} and~\ref{fig:real-diag}). The steady-state gain
+depends only on the ratio $\rho = Q/R$, not on $R$ itself, which is why both videos converge to
+the same value. In steady state the filter reduces to the fixed linear recursion
+$\hat{\mathbf{x}}_k = (I - K_\infty H) F \hat{\mathbf{x}}_{k-1} + K_\infty z_k$, so choosing
+$\rho$ is equivalent to choosing the cutoff frequency of a low-pass filter. The advantages of
+the Kalman formulation over a hand-designed filter are that it is derived from an explicit
+motion model, it provides its own uncertainty estimate (which makes the consistency tests above
+possible), and it extends directly to better models such as those suggested above.
+
+\subsection{Causal versus offline smoothing}
+The difference between the Kalman filter and the RTS smoother is the cost of being causal. For a
+recorded video the RTS smoother is clearly preferable. The Kalman filter is the right choice
+when frames must be stabilised as they arrive, for example in a live feed or on a robot; it then
+has to balance smoothness against lag, and no setting of $\rho$ achieves both, as the trade-off
+curves show.
+
+\subsection{Cropping}
+The fixed zoom of 1.12 hides corrections up to $38.4$\,px horizontally and $21.6$\,px vertically.
+On the synthetic video only the causal moving average exceeds this, in 17 frames during the pan.
+On the real video the vertical margin is exceeded by the causal moving average (19 frames), the
+Kalman filter (5 frames) and the RTS smoother (4 frames), so brief black borders can appear. A
+larger zoom, or a zoom computed from the corrections actually required, would remove them at
+the cost of field of view.
+
+\subsection{Limitations}
+\begin{itemize}
+  \item A 2D similarity model cannot represent parallax, perspective change or rolling-shutter
+        wobble, so strongly three-dimensional scenes show residual distortion.
+  \item The rotation is measured about the image origin rather than its centre, which couples
+        small rotations with translation; this appears as slow drift in the synthetic $y$ path
+        towards the end of the clip (Figure~\ref{fig:synth-traj}).
+  \item Large moving objects can bias motion estimation if they provide most of the RANSAC
+        inliers.
+  \item $R$ is estimated with a heuristic that assumes the shake lies above the cutoff of a
+        15-frame moving average; since part of the low-pass shake lies below it, $R$ is
+        underestimated (standard deviation $4.5$\,px estimated against $6$\,px generated on the
+        synthetic $x$ axis).
+\end{itemize}
+
+% =====================================================================
+\section{Conclusion}
+% =====================================================================
+Video stabilisation was formulated as estimating a camera's intended path from its measured,
+shaky path, using a constant-velocity state-space model. The motion-estimation stage was
+validated against ground truth to within $0.89$\,px. On both a synthetic and a real video, the
+offline RTS smoother gave the steadiest and smoothest output, with between a quarter and a third
+of the jitter of the best moving-average baseline and, on the synthetic video, the lowest error to the true
+intended path. The causal Kalman filter tracks deliberate motion with much less lag than a causal
+moving average but passes more shake through, a trade-off controlled by the single ratio $Q/R$.
+Consistency tests showed that the filter is over-confident because real shake is strongly
+correlated in time; modelling the shake as a coloured process and adapting $Q$ during manoeuvres
+are the natural next steps.
+
+% =====================================================================
+\begin{thebibliography}{99}
+\bibitem{kalman1960}
+R.~E. Kalman, ``A new approach to linear filtering and prediction problems,''
+\emph{Journal of Basic Engineering}, vol.~82, no.~1, pp.~35--45, 1960.
+
+\bibitem{rts1965}
+H.~E. Rauch, F.~Tung and C.~T. Striebel, ``Maximum likelihood estimates of linear dynamic
+systems,'' \emph{AIAA Journal}, vol.~3, no.~8, pp.~1445--1450, 1965.
+
+\bibitem{barshalom2001}
+Y.~Bar-Shalom, X.~R. Li and T.~Kirubarajan, \emph{Estimation with Applications to Tracking
+and Navigation}. New York: Wiley, 2001.
+
+\bibitem{shitomasi1994}
+J.~Shi and C.~Tomasi, ``Good features to track,'' in \emph{Proc.\ IEEE Conf.\ Computer Vision
+and Pattern Recognition (CVPR)}, 1994, pp.~593--600.
+
+\bibitem{lucaskanade1981}
+B.~D. Lucas and T.~Kanade, ``An iterative image registration technique with an application to
+stereo vision,'' in \emph{Proc.\ Int.\ Joint Conf.\ Artificial Intelligence (IJCAI)}, 1981,
+pp.~674--679.
+
+\bibitem{bouguet2001}
+J.-Y. Bouguet, ``Pyramidal implementation of the affine Lucas Kanade feature tracker:
+description of the algorithm,'' Intel Corporation, Technical report, 2001.
+
+\bibitem{fischler1981}
+M.~A. Fischler and R.~C. Bolles, ``Random sample consensus: a paradigm for model fitting with
+applications to image analysis and automated cartography,'' \emph{Communications of the ACM},
+vol.~24, no.~6, pp.~381--395, 1981.
+
+\bibitem{morimoto1998}
+C.~Morimoto and R.~Chellappa, ``Evaluation of image stabilization algorithms,'' in
+\emph{Proc.\ IEEE Int.\ Conf.\ Acoustics, Speech and Signal Processing (ICASSP)}, 1998,
+pp.~2789--2792.
+
+\bibitem{litvin2003}
+A.~Litvin, J.~Konrad and W.~C. Karl, ``Probabilistic video stabilization using Kalman filtering
+and mosaicking,'' in \emph{Proc.\ SPIE Image and Video Communications and Processing},
+vol.~5022, 2003, pp.~663--674.
+
+\bibitem{matsushita2006}
+Y.~Matsushita, E.~Ofek, W.~Ge, X.~Tang and H.-Y. Shum, ``Full-frame video stabilization with
+motion inpainting,'' \emph{IEEE Trans.\ Pattern Analysis and Machine Intelligence}, vol.~28,
+no.~7, pp.~1150--1163, 2006.
+
+\bibitem{grundmann2011}
+M.~Grundmann, V.~Kwatra and I.~Essa, ``Auto-directed video stabilization with robust L1 optimal
+camera paths,'' in \emph{Proc.\ IEEE Conf.\ Computer Vision and Pattern Recognition (CVPR)},
+2011, pp.~225--232.
+
+\bibitem{spoorthiuk}
+spoorthiuk (GitHub user), ``Video stabilization using Gaussian and Kalman filters,'' GitHub repository,
+\url{https://github.com/spoorthiuk/video-stabilization-using-gaussian-and-kalman-filters}.
+\end{thebibliography}
+
+\end{document}
